@@ -1,0 +1,51 @@
+{
+  "name": "NEXORA AI COMPANY - Webhook Demo",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "nexora-task",
+        "responseMode": "lastNode"
+      },
+      "id": "webhook",
+      "name": "Terima Tugas",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { ok: true, mode: 'DEMO', message: 'Webhook diterima. Hubungkan ke backend NEXORA setelah deployment.' } }}"
+      },
+      "id": "respond",
+      "name": "Balas DEMO",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        500,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "Terima Tugas": {
+      "main": [
+        [
+          {
+            "node": "Balas DEMO",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
