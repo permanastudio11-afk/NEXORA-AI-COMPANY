@@ -1,15 +1,11 @@
 
-"""NEXORA V2 - AI model connection layer.
-
-OpenAI-compatible API client with configurable provider,
-secure secret loading, timeout and bounded error handling.
-"""
+"""NEXORA V2 - AI model connection layer."""
 
 import json
 import os
+import socket
 import urllib.error
 import urllib.request
-import socket
 from typing import Optional
 
 
@@ -18,7 +14,6 @@ class LLMError(Exception):
 
 
 def _get_setting(name: str, default: str = "") -> str:
-    """Read configuration from environment or Streamlit Secrets."""
     value = os.getenv(name)
 
     if value:
@@ -33,7 +28,6 @@ def _get_setting(name: str, default: str = "") -> str:
 
 
 def get_config() -> dict:
-    """Return the active AI provider configuration."""
     return {
         "api_key": _get_setting("OPENAI_API_KEY"),
         "base_url": _get_setting(
@@ -47,7 +41,6 @@ def get_config() -> dict:
 
 
 def is_configured() -> bool:
-    """Check whether an API key is available."""
     return bool(get_config()["api_key"])
 
 
@@ -57,18 +50,11 @@ def chat(
     temperature: float = 0.3,
     max_tokens: Optional[int] = None,
 ) -> str:
-    """Send messages to an OpenAI-compatible chat completion API.
 
-    messages example:
-        [{"role": "user", "content": "Hello"}]
-    """
     config = get_config()
 
     if not config["api_key"]:
-        raise LLMError(
-            "API key belum dikonfigurasi. "
-            "Tambahkan OPENAI_API_KEY melalui Streamlit Secrets."
-        )
+        raise LLMError("API key belum dikonfigurasi.")
 
     if not messages:
         raise LLMError("Pesan tidak boleh kosong.")
@@ -92,7 +78,7 @@ def chat(
         content = message.get("content")
 
         if role not in ("system", "user", "assistant"):
-            raise LLMError(f"Role pesan tidak didukung: {role}")
+            raise LLMError(f"Role tidak didukung: {role}")
 
         if not isinstance(content, str) or not content.strip():
             raise LLMError("Isi pesan harus berupa teks.")
@@ -102,7 +88,10 @@ def chat(
             "content": content
         })
 
-    token_limit = max_tokens or config["max_tokens"]
+    token_limit = (
+        max_tokens if max_tokens is not None
+        else config["max_tokens"]
+    )
 
     if token_limit < 1 or token_limit > 16000:
         raise LLMError("Batas token harus antara 1 dan 16000.")
@@ -131,7 +120,9 @@ def chat(
             request,
             timeout=config["timeout"]
         ) as response:
-            result = json.loads(response.read().decode("utf-8"))
+            result = json.loads(
+                response.read().decode("utf-8")
+            )
 
         choices = result.get("choices", [])
 
@@ -148,7 +139,19 @@ def chat(
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
         raise LLMError(
-            f"AI provider HTTP {exc.code}: {detail[:1000]}"
+            f"AI provider HTTP {exc.code}: {detail[:500]}"
+        ) from exc
+
+    except socket.timeout as exc:
+        raise LLMError(
+            f"Server AI tidak merespons dalam "
+            f"{config['timeout']} detik."
+        ) from exc
+
+    except TimeoutError as exc:
+        raise LLMError(
+            f"Permintaan AI melewati batas waktu "
+            f"{config['timeout']} detik."
         ) from exc
 
     except urllib.error.URLError as exc:
@@ -156,13 +159,7 @@ def chat(
             f"Koneksi ke AI provider gagal: {exc.reason}"
         ) from exc
 
-   except socket.timeout as exc:
-    raise LLMError(
-        f"Server AI tidak merespons dalam {config['timeout']} detik. "
-        "Periksa koneksi atau coba kembali."
-    ) from exc
-
-except TimeoutError as exc:
-    raise LLMError(
-        f"Permintaan AI melewati batas waktu ({config['timeout']} detik)."
-    ) from exc
+    except json.JSONDecodeError as exc:
+        raise LLMError(
+            "Respons AI bukan JSON yang valid."
+        ) from exc
