@@ -42,6 +42,33 @@ with st.sidebar:
 
     st.divider()
     st.caption("V2 Intelligent Agents")
+    
+    st.divider()
+    st.subheader("AI Connection")
+
+    if st.button("Test AI Connection"):
+        if not is_configured():
+            st.error("API Key belum terkonfigurasi.")
+        else:
+            try:
+                with st.spinner("Menghubungkan ke Gemini..."):
+                    response = chat(
+                        messages=[
+                            {
+                                "role": "user",
+                                "content": "Balas persis: NEXORA AI CONNECTED"
+                            }
+                        ],
+                        max_tokens=50,
+                    )
+
+                st.success("Koneksi AI berhasil!")
+                st.write(response)
+
+            except Exception as error:
+                st.error(f"Koneksi gagal: {error}")
+
+
 
 
 # Command Center
