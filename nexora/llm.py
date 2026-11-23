@@ -156,8 +156,13 @@ def chat(
             f"Koneksi ke AI provider gagal: {exc.reason}"
         ) from exc
 
-    except TimeoutError as exc:
-        raise LLMError("Permintaan AI melewati batas waktu.") from exc
+   except socket.timeout as exc:
+    raise LLMError(
+        f"Server AI tidak merespons dalam {config['timeout']} detik. "
+        "Periksa koneksi atau coba kembali."
+    ) from exc
 
-    except json.JSONDecodeError as exc:
-        raise LLMError("Respons AI bukan JSON yang valid.") from exc
+except TimeoutError as exc:
+    raise LLMError(
+        f"Permintaan AI melewati batas waktu ({config['timeout']} detik)."
+    ) from exc
