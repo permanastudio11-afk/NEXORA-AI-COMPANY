@@ -3,6 +3,7 @@
 
 from .executor import execute_agent_task
 from .planner import create_plan
+from .final_review import review_project
 from .workflow_engine import validate_dependencies
 from .workflow_store import (
     create_workflow,
@@ -14,7 +15,7 @@ from .workflow_store import (
 
 
 def run_project(user_goal: str, db_path: str, progress_callback=None) -> dict:
-    """Plan, persist, execute, and report a complete AI workflow."""
+    """Plan, persist, execute, and review a complete AI workflow."""
 
     if not isinstance(user_goal, str) or not user_goal.strip():
         raise ValueError("Instruksi proyek tidak boleh kosong.")
@@ -25,7 +26,7 @@ def run_project(user_goal: str, db_path: str, progress_callback=None) -> dict:
     # 2. AI CEO creates and validates a plan.
     plan = create_plan(user_goal)
 
-    # 3. Validate task dependencies before saving or executing.
+    # 3. Validate task dependencies.
     ordered_tasks = validate_dependencies(plan["tasks"])
 
     # 4. Persist the plan.
@@ -86,7 +87,7 @@ def run_project(user_goal: str, db_path: str, progress_callback=None) -> dict:
                     previous_results=previous_results,
                 )
 
-            # Save every result immediately.
+            # Save every task result immediately.
             update_task_result(db_path, workflow_id, result)
 
             results.append(result)
@@ -103,7 +104,7 @@ def run_project(user_goal: str, db_path: str, progress_callback=None) -> dict:
                     "status": result["status"],
                 })
 
-        # 6. Calculate workflow summary.
+        # 6. Calculate task execution summary.
         completed = sum(
             1 for item in results
             if item["status"] == "COMPLETED"
@@ -119,20 +120,61 @@ def run_project(user_goal: str, db_path: str, progress_callback=None) -> dict:
             if item["status"] == "BLOCKED"
         )
 
+        # 7. AI CEO performs final project review.
+        try:
+            final_review = review_project(
+                user_goal=user_goal,
+                plan=plan,
+                agent_results=results,
+            )
+
+        except Exception as review_error:
+            # Preserve completed task results if CEO review fails.
+            final_review = {
+                "decision": "NEEDS_REVIEW",
+                "score": 0,
+                "summary": (
+                    "Evaluasi akhir AI CEO gagal dijalankan. "
+                    "Hasil tugas tetap tersimpan dan perlu diperiksa."
+                ),
+                "goal_achievement": (
+                    "Belum dapat dipastikan karena evaluasi akhir gagal."
+                ),
+                "strengths": [],
+                "gaps": [
+                    "AI CEO Final Review gagal: "
+                    + str(review_error)[:500]
+                ],
+                "risks": [
+                    "Proyek belum mendapatkan persetujuan akhir AI CEO."
+                ],
+                "recommendations": [
+                    "Periksa koneksi AI provider dan jalankan evaluasi ulang."
+                ],
+                "task_reviews": [],
+            }
+
+        # 8. Determine final workflow status.
+        final_status = (
+            "COMPLETED"
+            if (
+                completed == total
+                and final_review["decision"] == "APPROVED"
+            )
+            else "NEEDS_REVIEW"
+        )
+
         summary = {
             "total": total,
             "completed": completed,
             "failed": failed,
             "blocked": blocked,
-            "success": completed == total,
+            "success": final_status == "COMPLETED",
+            "ceo_decision": final_review["decision"],
+            "ceo_score": final_review["score"],
         }
 
-        final_status = (
-            "COMPLETED"
-            if completed == total
-            else "NEEDS_REVIEW"
-        )
-
+        # 9. Persist workflow summary and final status.
         update_workflow_summary(
             db_path,
             workflow_id,
@@ -145,6 +187,7 @@ def run_project(user_goal: str, db_path: str, progress_callback=None) -> dict:
             "plan": plan,
             "results": results,
             "summary": summary,
+            "final_review": final_review,
             "status": final_status,
         }
 
