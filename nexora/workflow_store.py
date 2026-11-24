@@ -23,7 +23,7 @@ def connect(db_path):
 
 
 def init_workflow_store(db_path):
-    """Create V2 workflow tables without modifying V1 tables."""
+    """Create or safely upgrade V2 workflow tables."""
 
     with connect(db_path) as con:
         con.executescript("""
@@ -84,6 +84,20 @@ def init_workflow_store(db_path):
         CREATE INDEX IF NOT EXISTS idx_v2_events_workflow
         ON v2_workflow_events(workflow_id);
         """)
+
+        # Backward-compatible database migration.
+        columns = {
+            row["name"]
+            for row in con.execute(
+                "PRAGMA table_info(v2_workflows)"
+            ).fetchall()
+        }
+
+        if "final_review_json" not in columns:
+            con.execute("""
+                ALTER TABLE v2_workflows
+                ADD COLUMN final_review_json TEXT
+            """)
 
 
 def create_workflow(db_path, plan):
@@ -153,6 +167,7 @@ def create_workflow(db_path, plan):
 
 def update_workflow_status(db_path, workflow_id, status):
     """Update workflow status."""
+
     allowed = {
         "PENDING",
         "RUNNING",
@@ -222,6 +237,43 @@ def update_task_result(db_path, workflow_id, result):
         ))
 
 
+def update_workflow_review(db_path, workflow_id, review):
+    """Persist the complete AI CEO final review."""
+
+    if not isinstance(review, dict):
+        raise ValueError("Laporan AI CEO tidak valid.")
+
+    review_json = json.dumps(review, ensure_ascii=False)
+
+    with connect(db_path) as con:
+        cur = con.execute("""
+            UPDATE v2_workflows
+            SET final_review_json = ?
+            WHERE id = ?
+        """, (review_json, workflow_id))
+
+        if cur.rowcount == 0:
+            raise ValueError(
+                f"Workflow {workflow_id} tidak ditemukan."
+            )
+
+        con.execute("""
+            INSERT INTO v2_workflow_events (
+                workflow_id, event_type, message, created_at
+            )
+            VALUES (?, ?, ?, ?)
+        """, (
+            workflow_id,
+            "CEO_FINAL_REVIEW",
+            (
+                "AI CEO memberikan keputusan "
+                f"{review.get('decision', 'UNKNOWN')} "
+                f"dengan skor {review.get('score', 0)}."
+            ),
+            _now(),
+        ))
+
+
 def update_workflow_summary(db_path, workflow_id, summary, status):
     """Save final workflow counters and status."""
 
@@ -247,7 +299,7 @@ def update_workflow_summary(db_path, workflow_id, summary, status):
 
 
 def get_workflow(db_path, workflow_id):
-    """Retrieve one workflow with its tasks and events."""
+    """Retrieve one workflow with tasks, events and CEO review."""
 
     with connect(db_path) as con:
         workflow = con.execute(
@@ -270,8 +322,22 @@ def get_workflow(db_path, workflow_id):
             ORDER BY id
         """, (workflow_id,)).fetchall()
 
+        workflow_data = dict(workflow)
+
+        review_json = workflow_data.get("final_review_json")
+
+        try:
+            final_review = (
+                json.loads(review_json)
+                if review_json else None
+            )
+        except (json.JSONDecodeError, TypeError):
+            final_review = None
+
+        workflow_data["final_review"] = final_review
+
         return {
-            "workflow": dict(workflow),
+            "workflow": workflow_data,
             "tasks": [dict(row) for row in tasks],
             "events": [dict(row) for row in events],
         }
