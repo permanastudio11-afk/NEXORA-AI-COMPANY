@@ -1,9 +1,11 @@
 
-"""NEXORA V2 - AI model connection layer."""
+"""NEXORA V2 - Resilient AI model connection layer."""
 
 import json
 import os
+import random
 import socket
+import time
 import urllib.error
 import urllib.request
 from typing import Optional
@@ -11,6 +13,10 @@ from typing import Optional
 
 class LLMError(Exception):
     """Raised when an AI provider request fails."""
+
+
+RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+MAX_RETRIES = 3
 
 
 def _get_setting(name: str, default: str = "") -> str:
@@ -28,6 +34,15 @@ def _get_setting(name: str, default: str = "") -> str:
 
 
 def get_config() -> dict:
+    try:
+        timeout = int(_get_setting("LLM_TIMEOUT", "60"))
+        max_tokens = int(_get_setting("LLM_MAX_TOKENS", "2000"))
+    except ValueError as exc:
+        raise LLMError("Konfigurasi timeout atau max_tokens tidak valid.") from exc
+
+    if timeout < 1 or max_tokens < 1:
+        raise LLMError("Timeout dan max_tokens harus lebih besar dari nol.")
+
     return {
         "api_key": _get_setting("OPENAI_API_KEY"),
         "base_url": _get_setting(
@@ -35,13 +50,32 @@ def get_config() -> dict:
             "https://api.openai.com/v1"
         ).rstrip("/"),
         "model": _get_setting("OPENAI_MODEL", "gpt-4o-mini"),
-        "timeout": int(_get_setting("LLM_TIMEOUT", "60")),
-        "max_tokens": int(_get_setting("LLM_MAX_TOKENS", "2000")),
+        "timeout": timeout,
+        "max_tokens": max_tokens,
     }
 
 
 def is_configured() -> bool:
-    return bool(get_config()["api_key"])
+    config = get_config()
+    return bool(
+        config["api_key"]
+        and config["base_url"]
+        and config["model"]
+    )
+
+
+def _retry_delay(attempt: int, headers=None) -> float:
+    """Calculate retry delay, respecting Retry-After when available."""
+
+    if headers:
+        retry_after = headers.get("Retry-After")
+        if retry_after:
+            try:
+                return min(max(float(retry_after), 0), 30)
+            except ValueError:
+                pass
+
+    return min(2 ** attempt + random.uniform(0, 0.5), 30)
 
 
 def chat(
@@ -55,6 +89,9 @@ def chat(
 
     if not config["api_key"]:
         raise LLMError("API key belum dikonfigurasi.")
+
+    if not config["base_url"] or not config["model"]:
+        raise LLMError("Base URL atau model AI belum dikonfigurasi.")
 
     if not messages:
         raise LLMError("Pesan tidak boleh kosong.")
@@ -105,61 +142,75 @@ def chat(
 
     url = config["base_url"] + "/chat/completions"
 
-    request = urllib.request.Request(
-        url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {config['api_key']}",
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
+    body = json.dumps(payload).encode("utf-8")
 
-    try:
-        with urllib.request.urlopen(
-            request,
-            timeout=config["timeout"]
-        ) as response:
-            result = json.loads(
-                response.read().decode("utf-8")
-            )
+    for attempt in range(MAX_RETRIES + 1):
 
-        choices = result.get("choices", [])
+        request = urllib.request.Request(
+            url,
+            data=body,
+            headers={
+                "Authorization": f"Bearer {config['api_key']}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
 
-        if not choices:
-            raise LLMError("Provider tidak mengembalikan hasil.")
+        try:
+            with urllib.request.urlopen(
+                request,
+                timeout=config["timeout"]
+            ) as response:
+                result = json.loads(
+                    response.read().decode("utf-8")
+                )
 
-        content = choices[0].get("message", {}).get("content")
+            choices = result.get("choices", [])
 
-        if not isinstance(content, str) or not content.strip():
-            raise LLMError("Jawaban AI kosong atau tidak valid.")
+            if not choices:
+                raise LLMError("Provider tidak mengembalikan hasil.")
 
-        return content.strip()
+            content = choices[0].get("message", {}).get("content")
 
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise LLMError(
-            f"AI provider HTTP {exc.code}: {detail[:500]}"
-        ) from exc
+            if not isinstance(content, str) or not content.strip():
+                raise LLMError("Jawaban AI kosong atau tidak valid.")
 
-    except socket.timeout as exc:
-        raise LLMError(
-            f"Server AI tidak merespons dalam "
-            f"{config['timeout']} detik."
-        ) from exc
+            return content.strip()
 
-    except TimeoutError as exc:
-        raise LLMError(
-            f"Permintaan AI melewati batas waktu "
-            f"{config['timeout']} detik."
-        ) from exc
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
 
-    except urllib.error.URLError as exc:
-        raise LLMError(
-            f"Koneksi ke AI provider gagal: {exc.reason}"
-        ) from exc
+            if exc.code in RETRYABLE_STATUS and attempt < MAX_RETRIES:
+                delay = _retry_delay(attempt, exc.headers)
+                time.sleep(delay)
+                continue
 
-    except json.JSONDecodeError as exc:
-        raise LLMError(
-            "Respons AI bukan JSON yang valid."
-        ) from exc
+            raise LLMError(
+                f"AI provider HTTP {exc.code}: {detail[:500]}"
+            ) from exc
+
+        except (socket.timeout, TimeoutError) as exc:
+            if attempt < MAX_RETRIES:
+                time.sleep(_retry_delay(attempt))
+                continue
+
+            raise LLMError(
+                f"Server AI tidak merespons setelah "
+                f"{MAX_RETRIES + 1} percobaan."
+            ) from exc
+
+        except urllib.error.URLError as exc:
+            if attempt < MAX_RETRIES:
+                time.sleep(_retry_delay(attempt))
+                continue
+
+            raise LLMError(
+                f"Koneksi ke AI provider gagal: {exc.reason}"
+            ) from exc
+
+        except json.JSONDecodeError as exc:
+            raise LLMError(
+                "Respons AI bukan JSON yang valid."
+            ) from exc
+
+    raise LLMError("Semua percobaan koneksi AI gagal.")
