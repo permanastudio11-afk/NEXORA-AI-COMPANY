@@ -13,7 +13,7 @@ Anda adalah AI CEO dan Chief Strategy Officer NEXORA AI COMPANY.
 Tugas Anda:
 1. Memahami tujuan pengguna.
 2. Menentukan departemen AI yang relevan.
-3. Memecah pekerjaan menjadi tugas yang spesifik.
+3. Memecah pekerjaan menjadi tugas spesifik.
 4. Menentukan urutan dan dependensi pekerjaan.
 5. Menetapkan kriteria keberhasilan setiap tugas.
 6. Memperhatikan risiko dan keterbatasan informasi.
@@ -23,7 +23,18 @@ Jangan mengarang fakta.
 Jangan mengklaim tindakan eksternal sudah dilakukan.
 Jangan membuat tugas yang tidak berhubungan dengan tujuan pengguna.
 
-Balas HANYA dengan JSON valid menggunakan struktur:
+ATURAN OUTPUT:
+- Balas hanya dengan satu objek JSON.
+- Jangan gunakan Markdown.
+- Jangan gunakan code fence.
+- Jangan menambahkan penjelasan di luar JSON.
+- Pastikan semua tanda kutip JSON menggunakan tanda kutip ganda.
+- Pastikan JSON lengkap dan valid.
+- Gunakan maksimal 10 tugas.
+- Setiap ID tugas harus unik.
+- Semua dependensi harus merujuk ke ID tugas yang tersedia.
+
+STRUKTUR WAJIB:
 
 {
   "project_title": "Judul proyek",
@@ -53,26 +64,57 @@ ceo, research, content, marketing, sales, finance, hr,
 project, admin, business, design, developer, video.
 
 AI CEO tidak boleh dimasukkan sebagai tugas spesialis.
+Gunakan hanya nama agent yang tersedia.
+Priority hanya boleh: LOW, MEDIUM, HIGH, CRITICAL.
 """
 
 
 def _extract_json(text: str) -> dict:
-    """Extract and validate JSON returned by the AI."""
+    """Extract a JSON object from an AI response."""
+
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("Jawaban AI Planner kosong.")
 
     cleaned = text.strip()
 
+    # Remove Markdown code fences.
     if cleaned.startswith("```"):
-        cleaned = cleaned.split("\n", 1)[-1]
-        if cleaned.rstrip().endswith("```"):
-            cleaned = cleaned.rstrip()[:-3].strip()
+        lines = cleaned.splitlines()
 
+        if lines and lines[0].strip().startswith("```"):
+            lines = lines[1:]
+
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+
+        cleaned = "\n".join(lines).strip()
+
+    # Find the beginning of the JSON object.
+    start = cleaned.find("{")
+
+    if start == -1:
+        raise ValueError(
+            "AI tidak menghasilkan objek JSON. "
+            f"Respons awal: {cleaned[:300]}"
+        )
+
+    # Decode one JSON object, allowing harmless text after it.
     try:
-        data = json.loads(cleaned)
+        decoder = json.JSONDecoder()
+        data, _ = decoder.raw_decode(cleaned[start:])
+
     except json.JSONDecodeError as exc:
-        raise ValueError("AI Planner menghasilkan JSON tidak valid.") from exc
+        raise ValueError(
+            "AI Planner menghasilkan JSON rusak atau terpotong. "
+            f"Detail: {exc.msg}, baris {exc.lineno}, "
+            f"kolom {exc.colno}. "
+            f"Respons awal: {cleaned[start:start+300]}"
+        ) from exc
 
     if not isinstance(data, dict):
-        raise ValueError("Format rencana harus berupa objek JSON.")
+        raise ValueError(
+            "Format rencana harus berupa objek JSON."
+        )
 
     return data
 
@@ -94,18 +136,51 @@ def validate_plan(plan: dict) -> dict:
 
     for field in required_fields:
         if field not in plan:
-            raise ValueError(f"Field wajib tidak ditemukan: {field}")
+            raise ValueError(
+                f"Field wajib tidak ditemukan: {field}"
+            )
 
-    if not isinstance(plan["tasks"], list) or not plan["tasks"]:
-        raise ValueError("Rencana harus memiliki minimal satu tugas.")
+    # Validate main text fields.
+    for field in [
+        "project_title",
+        "objective",
+        "strategy",
+        "final_deliverable",
+    ]:
+        if not isinstance(plan[field], str) or not plan[field].strip():
+            raise ValueError(
+                f"Field {field} harus berupa teks yang tidak kosong."
+            )
+
+    if not isinstance(plan["risks"], list):
+        raise ValueError("Field risks harus berupa daftar.")
+
+    if not isinstance(plan["tasks"], list):
+        raise ValueError("Field tasks harus berupa daftar.")
+
+    if not plan["tasks"]:
+        raise ValueError(
+            "Rencana harus memiliki minimal satu tugas."
+        )
 
     if len(plan["tasks"]) > 20:
-        raise ValueError("Maksimal 20 tugas per workflow.")
+        raise ValueError(
+            "Maksimal 20 tugas per workflow."
+        )
 
     valid_agents = set(AGENT_CONFIG.keys()) - {"ceo"}
+    valid_priorities = {
+        "LOW",
+        "MEDIUM",
+        "HIGH",
+        "CRITICAL",
+    }
+
     task_ids = set()
 
+    # First pass: validate task fields and IDs.
     for task in plan["tasks"]:
+
         if not isinstance(task, dict):
             raise ValueError("Format tugas tidak valid.")
 
@@ -121,7 +196,9 @@ def validate_plan(plan: dict) -> dict:
 
         for field in required_task_fields:
             if field not in task:
-                raise ValueError(f"Field tugas tidak ditemukan: {field}")
+                raise ValueError(
+                    f"Field tugas tidak ditemukan: {field}"
+                )
 
         task_id = task["id"]
         agent = task["agent"]
@@ -130,37 +207,62 @@ def validate_plan(plan: dict) -> dict:
             raise ValueError("ID tugas tidak valid.")
 
         if task_id in task_ids:
-            raise ValueError(f"ID tugas duplikat: {task_id}")
+            raise ValueError(
+                f"ID tugas duplikat: {task_id}"
+            )
 
         task_ids.add(task_id)
 
-        if agent not in valid_agents:
-            raise ValueError(f"Agent tidak dikenal: {agent}")
+        if not isinstance(agent, str) or agent not in valid_agents:
+            raise ValueError(
+                f"Agent tidak dikenal: {agent}"
+            )
 
         if not isinstance(task["title"], str) or not task["title"].strip():
             raise ValueError("Judul tugas tidak valid.")
 
         if not isinstance(task["description"], str):
-            raise ValueError("Deskripsi tugas harus berupa teks.")
+            raise ValueError(
+                "Deskripsi tugas harus berupa teks."
+            )
 
         if not isinstance(task["depends_on"], list):
-            raise ValueError("Dependensi harus berupa daftar.")
+            raise ValueError(
+                "Dependensi harus berupa daftar."
+            )
+
+        if not all(
+            isinstance(dep, str)
+            for dep in task["depends_on"]
+        ):
+            raise ValueError(
+                "Setiap dependensi harus berupa ID teks."
+            )
 
         if not isinstance(task["acceptance_criteria"], list):
-            raise ValueError("Kriteria penerimaan harus berupa daftar.")
+            raise ValueError(
+                "Kriteria penerimaan harus berupa daftar."
+            )
 
-        if task["priority"] not in ("LOW", "MEDIUM", "HIGH", "CRITICAL"):
-            raise ValueError("Prioritas tugas tidak valid.")
+        if task["priority"] not in valid_priorities:
+            raise ValueError(
+                f"Prioritas tugas tidak valid: {task['priority']}"
+            )
 
+    # Second pass: validate task dependencies.
     for task in plan["tasks"]:
+
         for dependency in task["depends_on"]:
+
             if dependency not in task_ids:
                 raise ValueError(
                     f"Dependensi {dependency} tidak ditemukan."
                 )
 
             if dependency == task["id"]:
-                raise ValueError("Tugas tidak boleh bergantung pada dirinya sendiri.")
+                raise ValueError(
+                    "Tugas tidak boleh bergantung pada dirinya sendiri."
+                )
 
     return plan
 
@@ -169,10 +271,14 @@ def create_plan(user_goal: str) -> dict:
     """Generate a structured project plan using the AI CEO."""
 
     if not isinstance(user_goal, str) or not user_goal.strip():
-        raise ValueError("Instruksi pengguna tidak boleh kosong.")
+        raise ValueError(
+            "Instruksi pengguna tidak boleh kosong."
+        )
 
     if len(user_goal) > 12000:
-        raise ValueError("Instruksi terlalu panjang. Maksimal 12000 karakter.")
+        raise ValueError(
+            "Instruksi terlalu panjang. Maksimal 12000 karakter."
+        )
 
     agent_summary = "\n".join(
         f"- {key}: {config['description']}"
@@ -187,9 +293,18 @@ TUJUAN PENGGUNA:
 DEPARTEMEN YANG TERSEDIA:
 {agent_summary}
 
-Buat rencana kerja yang realistis, terstruktur, dan dapat dieksekusi.
+INSTRUKSI:
+Buat rencana kerja yang realistis, terstruktur,
+dan dapat dieksekusi.
+
 Gunakan hanya agent yang relevan.
-Pastikan setiap dependensi merujuk pada ID tugas yang benar.
+Gunakan maksimal 10 tugas.
+Jangan memasukkan agent ceo sebagai tugas.
+Pastikan setiap ID tugas unik.
+Pastikan setiap dependensi merujuk pada ID yang benar.
+Setiap tugas wajib memiliki seluruh field yang diminta.
+Balas hanya dengan JSON valid.
+Jangan menambahkan Markdown atau penjelasan.
 """
 
     response = chat(
@@ -200,13 +315,14 @@ Pastikan setiap dependensi merujuk pada ID tugas yang benar.
             }
         ],
         system_prompt=PLANNER_SYSTEM_PROMPT,
-        temperature=0.2,
-        max_tokens=3000,
+        temperature=0.1,
+        max_tokens=4000,
     )
 
     try:
         plan = _extract_json(response)
         return validate_plan(plan)
+
     except (ValueError, TypeError) as exc:
         raise LLMError(
             f"Rencana AI tidak lolos validasi: {exc}"
