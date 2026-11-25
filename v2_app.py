@@ -169,7 +169,7 @@ with st.sidebar:
                                 ),
                             }
                         ],
-                        max_tokens=50,
+                        max_tokens=256
                     )
 
                 if not isinstance(response, str) or not response.strip():
